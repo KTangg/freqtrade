@@ -5,7 +5,7 @@ from setuptools import setup
 plot = ['plotly>=4.0']
 hyperopt = [
     'scipy',
-    'scikit-learn<=1.1.3',
+    'scikit-learn<=1.3.1',
     'scikit-optimize>=0.7.0',
     'filelock',
 ]
