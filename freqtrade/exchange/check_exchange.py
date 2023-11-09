@@ -36,13 +36,13 @@ def check_exchange(config: Config, check_for_bad: bool = True) -> bool:
             f'{", ".join(available_exchanges())}'
         )
 
-    if not is_exchange_known_ccxt(exchange):
-        raise OperationalException(
-            f'Exchange "{exchange}" is not known to the ccxt library '
-            f'and therefore not available for the bot.\n'
-            f'The following exchanges are available for Freqtrade: '
-            f'{", ".join(available_exchanges())}'
-        )
+    # if not is_exchange_known_ccxt(exchange):
+    #     raise OperationalException(
+    #         f'Exchange "{exchange}" is not known to the ccxt library '
+    #         f'and therefore not available for the bot.\n'
+    #         f'The following exchanges are available for Freqtrade: '
+    #         f'{", ".join(available_exchanges())}'
+    #     )
 
     valid, reason = validate_exchange(exchange)
     if not valid:

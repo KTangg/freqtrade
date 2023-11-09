@@ -24,7 +24,7 @@ from freqtrade.enums import (BacktestState, CandleType, ExitCheckTuple, ExitType
 from freqtrade.exceptions import DependencyException, OperationalException
 from freqtrade.exchange import (amount_to_contract_precision, price_to_precision,
                                 timeframe_to_minutes, timeframe_to_seconds)
-from freqtrade.exchange.exchange import Exchange
+from freqtrade.exchange import Exchange, InteractiveBroker
 from freqtrade.mixins import LoggingMixin
 from freqtrade.optimize.backtest_caching import get_strategy_run_id
 from freqtrade.optimize.bt_progress import BTProgress
@@ -74,7 +74,7 @@ class Backtesting:
     backtesting.start()
     """
 
-    def __init__(self, config: Config, exchange: Optional[Exchange] = None) -> None:
+    def __init__(self, config: Config, exchange: Optional[InteractiveBroker] = None) -> None:
 
         LoggingMixin.show_output = False
         self.config = config
@@ -132,7 +132,6 @@ class Backtesting:
             self.fee = config['fee']
         else:
             self.fee = self.exchange.get_fee(symbol=self.pairlists.whitelist[0])
-        self.precision_mode = self.exchange.precisionMode
 
         if self.config.get('freqai_backtest_live_models', False):
             from freqtrade.freqai.utils import get_timerange_backtest_live_models

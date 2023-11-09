@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
 from freqtrade.constants import Config
 from freqtrade.exceptions import OperationalException
-from freqtrade.exchange import Exchange, market_is_active
+from freqtrade.exchange import Exchange, market_is_active, InteractiveBroker
 from freqtrade.exchange.types import Ticker, Tickers
 from freqtrade.mixins import LoggingMixin
 
@@ -54,7 +54,7 @@ class IPairList(LoggingMixin, ABC):
 
     is_pairlist_generator = False
 
-    def __init__(self, exchange: Exchange, pairlistmanager,
+    def __init__(self, exchange: InteractiveBroker, pairlistmanager,
                  config: Config, pairlistconfig: Dict[str, Any],
                  pairlist_pos: int) -> None:
         """
@@ -66,7 +66,7 @@ class IPairList(LoggingMixin, ABC):
         """
         self._enabled = True
 
-        self._exchange: Exchange = exchange
+        self._exchange: InteractiveBroker = exchange
         self._pairlistmanager = pairlistmanager
         self._config = config
         self._pairlistconfig = pairlistconfig
@@ -209,34 +209,19 @@ class IPairList(LoggingMixin, ABC):
         :return: the list of pairs the user wants to trade without those unavailable or
         black_listed
         """
-        markets = self._exchange.markets
-        if not markets:
-            raise OperationalException(
-                'Markets not loaded. Make sure that exchange is initialized correctly.')
-
         sanitized_whitelist: List[str] = []
         for pair in pairlist:
+
+            contract = self._exchange._create_contract(pair)
             # pair is not in the generated dynamic market or has the wrong stake currency
-            if pair not in markets:
+            if not self._exchange.verify_contract(contract):
                 self.log_once(f"Pair {pair} is not compatible with exchange "
                               f"{self._exchange.name}. Removing it from whitelist..",
                               logger.warning)
                 continue
 
-            if not self._exchange.market_is_tradable(markets[pair]):
-                self.log_once(f"Pair {pair} is not tradable with Freqtrade."
-                              "Removing it from whitelist..", logger.warning)
-                continue
-
-            if self._exchange.get_pair_quote_currency(pair) != self._config['stake_currency']:
-                self.log_once(f"Pair {pair} is not compatible with your stake currency "
-                              f"{self._config['stake_currency']}. Removing it from whitelist..",
-                              logger.warning)
-                continue
-
             # Check if market is active
-            market = markets[pair]
-            if not market_is_active(market):
+            if not self._exchange.is_open(contract):
                 self.log_once(f"Ignoring {pair} from whitelist. Market is not active.", logger.info)
                 continue
             if pair not in sanitized_whitelist:

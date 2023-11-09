@@ -99,12 +99,6 @@ class Configuration:
 
         self._process_freqai_options(config)
 
-        # Import check_exchange here to avoid import cycle problems
-        from freqtrade.exchange.check_exchange import check_exchange
-
-        # Check if the exchange set by the user is supported
-        check_exchange(config, config.get('experimental', {}).get('block_bad_exchanges', True))
-
         self._resolve_pairs_list(config)
 
         process_temporary_deprecated_settings(config)

@@ -148,7 +148,7 @@ class PairListManager(LoggingMixin):
         :return: pairlist - whitelisted pairs
         """
         try:
-            whitelist = expand_pairlist(pairlist, self._exchange.get_markets().keys(), keep_invalid)
+            whitelist = pairlist
         except ValueError as err:
             logger.error(f"Pair whitelist contains an invalid Wildcard: {err}")
             return []

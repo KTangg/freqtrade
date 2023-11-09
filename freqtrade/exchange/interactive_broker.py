@@ -14,12 +14,18 @@ from typing import Any, Coroutine, Dict, List, Literal, Optional, Tuple, Union
 
 from ib_insync import (
     IB,
-    Contract
+    Contract,
+    ContractDetails,
+    Order,
+    Trade,
+    LimitOrder,
+    MarketOrder,
+    StopOrder
 )
 from cachetools import TTLCache
 
 # import ccxt.async_support as ccxt_async
-# from ccxt import TICK_SIZE
+from ccxt import TICK_SIZE, DECIMAL_PLACES
 from dateutil import parser
 from pandas import DataFrame, concat
 
@@ -57,6 +63,8 @@ class InteractiveBroker:
     # Parameters to add directly to buy/sell calls (like agreeing to trading agreement)
     _params: Dict = {}
 
+    markets = {}
+
     # Additional parameters - added to the ib object
     __ib_params: Dict = {}
 
@@ -66,10 +74,11 @@ class InteractiveBroker:
 
     # TODO Change these to IB compatibility
     _ft_has_default: Dict = {
-        "stoploss_on_exchange": True, # IB provide stoploss order StopOrder
+        "stoploss_on_exchange": True, # IB provide stoploss order StopOrder,
+        "stoploss_order_types": {"stoploss": "stoploss"},
         "stop_price_param": "stopLossPrice",  # Used for stoploss_on_exchange request
         "stop_price_prop": "stopLossPrice",  # Used for stoploss_on_exchange response parsing
-        "order_time_in_force": ["DAY", "GTC", "IOC", "GTD", "OPG", "FOK", "DTC"] # https://interactivebrokers.github.io/tws-api/classIBApi_1_1Order.html#a04f61266450f61c36fae22946c74a8f3
+        "order_time_in_force": ["DAY", "GTC", "IOC", "GTD", "OPG", "FOK", "DTC"], # https://interactivebrokers.github.io/tws-api/classIBApi_1_1Order.html#a04f61266450f61c36fae22946c74a8f3
         "ohlcv_params": {},
         "ohlcv_candle_limit": 500, # IB got 1000 limit in one call 
         "ohlcv_has_history": True,  # Some exchanges (Kraken) don't provide history via ohlcv
@@ -156,8 +165,8 @@ class InteractiveBroker:
 
         # Deep merge ft_has with default ft_has options
         self._ft_has = deep_merge_dicts(self._ft_has, deepcopy(self._ft_has_default))
-        if self.trading_mode == TradingMode.FUTURES:
-            self._ft_has = deep_merge_dicts(self._ft_has_futures, self._ft_has)
+        # if self.trading_mode == TradingMode.FUTURES:
+        #     self._ft_has = deep_merge_dicts(self._ft_has_futures, self._ft_has)
         if exchange_conf.get('_ft_has_params'):
             self._ft_has = deep_merge_dicts(exchange_conf.get('_ft_has_params'),
                                             self._ft_has)
@@ -248,7 +257,7 @@ class InteractiveBroker:
         # Extract IB-specific connection details from the config
         host = config.get('host', '127.0.0.1')
         port = config.get('port', 4002)
-        client_id = config.get('client_id', 1)
+        client_id = config.get('client_id', 'freqtrade')
         timeout = config.get('timeout', 10)
 
         # NOTE current implement around NASDAQ exchange
@@ -259,6 +268,7 @@ class InteractiveBroker:
             ib.connect(host=host, port=port, clientId=client_id, timeout=timeout)
             ib.name = exchange
             ib.primary_exchange = exchange
+            ib.reqMarketDataType(3)
         except Exception as e:
             # Handle any errors that arise during connection
             raise OperationalException(f"Initialization of IB failed. Reason: {e}") from e
@@ -294,10 +304,19 @@ class InteractiveBroker:
 
     @property
     def precisionMode(self) -> int:
-        # TODO
         # NOTE precision of TICK size is relied on each contract
         """exchange ccxt precisionMode"""
-        return self._api.precisionMode
+        return DECIMAL_PLACES
+    
+    def is_open(self, contract: Contract) -> bool:
+        self._api.reqMarketDataType(1)
+        
+        market_data = self._api.reqMktData(contract)
+
+        if market_data:
+            return True
+        
+        return False
 
     def additional_exchange_init(self) -> None:
         """
@@ -345,7 +364,19 @@ class InteractiveBroker:
         """ Return a pair's base currency (base/quote:settlement) """
         return pair.split('/')[0]
     
-    def create_contract(self, pair: str) -> Contract:
+    def verify_contract(self, contract: Contract) -> bool:
+        if not self._api.qualifyContracts(contract):
+            return False
+        
+        return True
+    
+    def reload_markets(self):
+        """
+        Dummy method
+        """
+        pass
+    
+    def _create_contract(self, pair: str) -> Contract:
         symbol = self.get_pair_base_currency(pair)
 
         return Contract(
@@ -354,27 +385,55 @@ class InteractiveBroker:
             exchange='SMART',
             primaryExchange=self._api.primary_exchange
         )
+    
+    def _get_contract_detail(self, pair: str) -> ContractDetails:
+        contract = self._create_contract(pair)
+        
+        l_detail = self._api.reqContractDetails(contract)
+
+        if len(l_detail) == 0:
+            raise ValueError(f"Couldn't get {pair} details from market")
+        
+        return l_detail[0]
+    
+    def contract_detail(self, pair: str, detail: str):
+        c = self._get_contract_detail(pair)
+
+        return getattr(c, detail)
 
     def klines(self, pair_interval: PairWithTimeframe, copy: bool = True) -> DataFrame:
         if pair_interval in self._klines:
             return self._klines[pair_interval].copy() if copy else self._klines[pair_interval]
         else:
             return DataFrame()
+        
+    def _symbol_to_pair(self, symbol: str) -> str:
+        """
+        Format IB symbol to pair
+        """
+        quote = self.get_quote_currencies()[0]
+
+        return f'{symbol}/{quote}'.upper()
+    
+    def get_markets(self) -> dict:
+
+        return {}
 
     # NOTE Only SPOT is support currently
     def get_contract_size(self, pair: str) -> Optional[float]:
-        if self.trading_mode == TradingMode.FUTURES:
-            market = self.markets.get(pair, {})
-            contract_size: float = 1.0
-            if not market:
-                return None
-            if market.get('contractSize') is not None:
-                # ccxt has contractSize in markets as string
-                contract_size = float(market['contractSize'])
-            return contract_size
-        else:
-            return 1
+        # if self.trading_mode == TradingMode.FUTURES:
+        #     market = self.markets.get(pair, {})
+        #     contract_size: float = 1.0
+        #     if not market:
+        #         return None
+        #     if market.get('contractSize') is not None:
+        #         # ccxt has contractSize in markets as string
+        #         contract_size = float(market['contractSize'])
+        #     return contract_size
+        # else:
+        return 1
 
+    
     # TODO double check with more knowledge
     def _trades_contracts_to_amount(self, trades: List) -> List:
         if len(trades) > 0 and 'symbol' in trades[0]:
@@ -412,6 +471,8 @@ class InteractiveBroker:
         Helper wrapper around amount_to_contract_precision
         """
         contract_size = self.get_contract_size(pair)
+
+        self.get_precision_amount(pair)
 
         return amount_to_contract_precision(amount, self.get_precision_amount(pair),
                                             self.precisionMode, contract_size)
@@ -460,7 +521,7 @@ class InteractiveBroker:
                             )
 
             # Create contract to validate
-            contract = self.create_contract(pair)
+            contract = self._create_contract(pair)
 
             # Get contract details
             l_detail = self._api.reqContractDetails(contract)
@@ -517,16 +578,16 @@ class InteractiveBroker:
                 f'On exchange stoploss is not supported for {self.name}.'
             )
         # NOTE Not support FUTURE Trade
-        # if self.trading_mode == TradingMode.FUTURES:
-        #     price_mapping = self._ft_has.get('stop_price_type_value_mapping', {}).keys()
-        #     if (
-        #         order_types.get("stoploss_on_exchange", False) is True
-        #         and 'stoploss_price_type' in order_types
-        #         and order_types['stoploss_price_type'] not in price_mapping
-        #     ):
-        #         raise OperationalException(
-        #             f'On exchange stoploss price type is not supported for {self.name}.'
-        #         )
+        if self.trading_mode == TradingMode.FUTURES:
+            price_mapping = self._ft_has.get('stop_price_type_value_mapping', {}).keys()
+            if (
+                order_types.get("stoploss_on_exchange", False) is True
+                and 'stoploss_price_type' in order_types
+                and order_types['stoploss_price_type'] not in price_mapping
+            ):
+                raise OperationalException(
+                    f'On exchange stoploss price type is not supported for {self.name}.'
+                )
 
     def validate_pricing(self, pricing: Dict) -> None:
         # NOTE IB could be fetch the market depth && ticker data
@@ -609,6 +670,7 @@ class InteractiveBroker:
         """
         return hasattr(self._api, endpoint)
 
+    @staticmethod
     def get_precision(number: float) -> int:
         # Convert the number to a string and split by the decimal point
         parts = str(number).split('.')
@@ -617,6 +679,15 @@ class InteractiveBroker:
             return 0
         # Otherwise, return the length of the decimal portion
         return len(parts[1])
+    
+    def _get_prize_increment(self, pair: str) -> float:
+        market_rule_ids = self.contract_detail(pair, 'marketRuleIds')
+
+        # NOTE marketRuleIds return str with comma sep
+        id = market_rule_ids.split(',')[0]
+        price_increment = self._api.reqMarketRule(id)[0]
+
+        return price_increment.increment
 
 
     # NOTE IB precision is based on contract
@@ -627,9 +698,7 @@ class InteractiveBroker:
         :return: precision for amount or None. Must be used in combination with precisionMode
         """
         
-        contract = self.create_contract(pair)
-        detail = self._api.reqContractDetails(contract)
-        min_size = detail[0].minSize
+        min_size = self.contract_detail(pair, 'sizeIncrement')
 
         return self.get_precision(min_size)
 
@@ -641,28 +710,35 @@ class InteractiveBroker:
         :return: precision for price or None. Must be used in combination with precisionMode
         """
         
-        contract = self.create_contract(pair)
-        detail = self._api.reqContractDetails(contract)
-        min_tick = detail[0].minTick
+        price_tick = self._get_prize_increment(pair)
 
-        return self.get_precision(min_tick)
+        return self.get_precision(price_tick)
 
     def amount_to_precision(self, pair: str, amount: float) -> float:
         """
         Returns the amount to buy or sell to a precision the Exchange accepts
         """
         
-        return amount_to_precision(amount, self.get_precision_amount(pair), self.precisionMode)
+        size_increment = self.contract_detail(pair, 'sizeIncrement')
 
-    # TODO IB compat
+        # NOTE If order minsize is involve in calculation
+        # min_size = self.contract_detail(pair, 'minSize')
+        # x = int((amount - min_size) / size_increment) * size_increment
+        # return x if x > 0 else 0
+
+        return int(amount / size_increment) * size_increment
+
     def price_to_precision(self, pair: str, price: float, *, rounding_mode: int = ROUND) -> float:
         """
         Returns the price rounded to the precision the Exchange accepts.
         The default price_rounding_mode in conf is ROUND.
         For stoploss calculations, must use ROUND_UP for longs, and ROUND_DOWN for shorts.
         """
-        return price_to_precision(price, self.get_precision_price(pair),
-                                  self.precisionMode, rounding_mode=rounding_mode)
+        
+        price_increment = self._get_prize_increment(pair)
+
+        # NOTE this will only round down the price
+        return int(price / price_increment) * price_increment
 
     # TODO IB compat
     def price_get_one_pip(self, pair: str, price: float) -> float:
@@ -670,11 +746,9 @@ class InteractiveBroker:
         Get's the "1 pip" value for this pair.
         Used in PriceFilter to calculate the 1pip movements.
         """
-        precision = self.markets[pair]['precision']['price']
-        if self.precisionMode == TICK_SIZE:
-            return precision
-        else:
-            return 1 / pow(10, precision)
+        min_tick =  self.contract_detail(pair, 'minTick')
+        
+        return min_tick
 
     def get_min_pair_stake_amount(
         self,
@@ -692,6 +766,29 @@ class InteractiveBroker:
             raise OperationalException(f'{self.name}.get_max_pair_stake_amount should'
                                        'never set max_stake_amount to None')
         return max_stake_amount
+    
+    # TODO this is simplified version
+    def _get_contract_limit(
+            self,
+            pair: str,
+        ) -> Dict[str, dict]:
+        contract_detail = self._get_contract_detail(pair)
+        account_summary = self._api.accountSummary()
+        available_funds = next((tag.value for tag in account_summary if tag.tag == 'AvailableFunds'), None)
+
+        limit = {
+            'cost': {
+                'min': 0,
+                'max': float('inf')
+            },
+            'amount': {
+                'min': contract_detail.minSize,
+                'max': float(available_funds)
+            }
+        }
+    
+        return limit
+
 
     def _get_stake_amount_limit(
         self,
@@ -703,11 +800,6 @@ class InteractiveBroker:
     ) -> Optional[float]:
 
         isMin = limit == 'min'
-
-        try:
-            market = self.markets[pair]
-        except KeyError:
-            raise ValueError(f"Can't get market information for symbol {pair}")
 
         if isMin:
             # reserve some percent defined in config (5% default) + stoploss
@@ -723,7 +815,8 @@ class InteractiveBroker:
             stoploss_reserve = 1.0
 
         stake_limits = []
-        limits = market['limits']
+        limits = self._get_contract_limit(pair)
+    
         if (limits['cost'][limit] is not None):
             stake_limits.append(
                 self._contracts_to_amount(pair, limits['cost'][limit]) * stoploss_reserve
@@ -788,8 +881,10 @@ class InteractiveBroker:
             # Workaround to avoid filling stoploss orders immediately
             dry_order["ft_order_type"] = "stoploss"
         orderbook: Optional[OrderBook] = None
-        if self.exchange_has('fetchL2OrderBook'):
-            orderbook = self.fetch_l2_order_book(pair, 20)
+
+        # NOTE ib only limit 5 depth
+        orderbook = self.fetch_l2_order_book(pair, 5)
+
         if ordertype == "limit" and orderbook:
             # Allow a 1% price difference
             allowed_diff = 0.01
@@ -825,12 +920,12 @@ class InteractiveBroker:
         dry_order: Dict[str, Any],
         taker_or_maker: MakerTaker,
     ) -> Dict[str, Any]:
-        fee = self.get_fee(pair, taker_or_maker=taker_or_maker)
+        fee = self.get_fee(pair, side=dry_order['side'], taker_or_maker=taker_or_maker)
         dry_order.update({
             'fee': {
                 'currency': self.get_pair_quote_currency(pair),
-                'cost': dry_order['cost'] * fee,
-                'rate': fee
+                'cost': fee,
+                'rate': fee / dry_order['cost']
             }
         })
         return dry_order
@@ -840,48 +935,44 @@ class InteractiveBroker:
         """
         Get the market order fill price based on orderbook interpolation
         """
-        if self.exchange_has('fetchL2OrderBook'):
-            if not orderbook:
-                orderbook = self.fetch_l2_order_book(pair, 20)
-            ob_type: OBLiteral = 'asks' if side == 'buy' else 'bids'
-            slippage = 0.05
-            max_slippage_val = rate * ((1 + slippage) if side == 'buy' else (1 - slippage))
+        if not orderbook:
+            orderbook = self.fetch_l2_order_book(pair)
 
-            remaining_amount = amount
-            filled_value = 0.0
-            book_entry_price = 0.0
-            for book_entry in orderbook[ob_type]:
-                book_entry_price = book_entry[0]
-                book_entry_coin_volume = book_entry[1]
-                if remaining_amount > 0:
-                    if remaining_amount < book_entry_coin_volume:
-                        # Orderbook at this slot bigger than remaining amount
-                        filled_value += remaining_amount * book_entry_price
-                        break
-                    else:
-                        filled_value += book_entry_coin_volume * book_entry_price
-                    remaining_amount -= book_entry_coin_volume
-                else:
+        ob_type: OBLiteral = 'asks' if side == 'buy' else 'bids'
+        slippage = 0.05
+        max_slippage_val = rate * ((1 + slippage) if side == 'buy' else (1 - slippage))
+
+        remaining_amount = amount
+        filled_value = 0.0
+        book_entry_price = 0.0
+        for book_entry in orderbook[ob_type]:
+            book_entry_price = book_entry[0]
+            book_entry_coin_volume = book_entry[1]
+            if remaining_amount > 0:
+                if remaining_amount < book_entry_coin_volume:
+                    # Orderbook at this slot bigger than remaining amount
+                    filled_value += remaining_amount * book_entry_price
                     break
+                else:
+                    filled_value += book_entry_coin_volume * book_entry_price
+                remaining_amount -= book_entry_coin_volume
             else:
-                # If remaining_amount wasn't consumed completely (break was not called)
-                filled_value += remaining_amount * book_entry_price
-            forecast_avg_filled_price = max(filled_value, 0) / amount
-            # Limit max. slippage to specified value
-            if side == 'buy':
-                forecast_avg_filled_price = min(forecast_avg_filled_price, max_slippage_val)
+                break
+        else:
+            # If remaining_amount wasn't consumed completely (break was not called)
+            filled_value += remaining_amount * book_entry_price
+        forecast_avg_filled_price = max(filled_value, 0) / amount
+        # Limit max. slippage to specified value
+        if side == 'buy':
+            forecast_avg_filled_price = min(forecast_avg_filled_price, max_slippage_val)
 
-            else:
-                forecast_avg_filled_price = max(forecast_avg_filled_price, max_slippage_val)
+        else:
+            forecast_avg_filled_price = max(forecast_avg_filled_price, max_slippage_val)
 
-            return self.price_to_precision(pair, forecast_avg_filled_price)
-
-        return rate
+        return self.price_to_precision(pair, forecast_avg_filled_price)
 
     def _dry_is_price_crossed(self, pair: str, side: str, limit: float,
                               orderbook: Optional[OrderBook] = None, offset: float = 0.0) -> bool:
-        if not self.exchange_has('fetchL2OrderBook'):
-            return True
         if not orderbook:
             orderbook = self.fetch_l2_order_book(pair, 1)
         try:
@@ -945,6 +1036,7 @@ class InteractiveBroker:
 
     # Order handling
 
+    # NOT SPOT
     def _lev_prep(self, pair: str, leverage: float, side: BuySell, accept_fail: bool = False):
         if self.trading_mode != TradingMode.SPOT:
             self.set_margin_mode(pair, self.margin_mode, accept_fail)
@@ -968,9 +1060,63 @@ class InteractiveBroker:
     def _order_needs_price(self, ordertype: str) -> bool:
         return (
             ordertype != 'market'
-            or self._api.options.get("createMarketBuyOrderRequiresPrice", False)
-            or self._ft_has.get('marketOrderRequiresPrice', False)
         )
+    
+
+    @staticmethod
+    def _trade_status(trade: Trade) -> str:
+        status_map = {
+            'ApiPending': 'open',
+            'PendingSubmit': 'open',
+            'PendingCancel': 'open',
+            'PreSubmitted': 'open',
+            'Submitted': 'open',
+            'ApiCancelled': 'open',
+            'Cancelled': 'canceled',
+            'Filled': 'closed',
+            'Inactive': 'canceled'
+        }
+        
+        try:
+            return status_map[trade.orderStatus.status]
+    
+        except KeyError:
+            return None
+        
+    @staticmethod
+    def _trade_commision(trade: Trade) -> float:
+        commision = sum(fill.commissionReport.commission for fill in trade.fills)
+
+        return commision
+    
+    def _format_ib_order(self, trade: Trade, pair: str, leverage: float, type: str) -> Dict:
+
+        order_time = trade.log[0].time if trade.log else dt_now()
+
+        order: Dict[str, Any] = {
+            'id': trade.order.orderId,
+            'symbol': pair,
+            'price': trade.order.lmtPrice,
+            'average': trade.orderStatus.avgFillPrice,
+            'amount': trade.order.totalQuantity,
+            'cost': trade.orderStatus.avgFillPrice * trade.order.totalQuantity,
+            'type': type,
+            'side': trade.order.action.lower(),
+            'filled': trade.orderStatus.filled,
+            'remaining': trade.order.totalQuantity - trade.orderStatus.filled,
+            'datetime': order_time.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+            'timestamp': dt_ts(order_time),
+            'status': self._trade_status(trade),
+            'fee': {
+                'currency': self.get_pair_quote_currency(pair),
+                'cost': self._trade_commision(trade),
+                'rate': self._trade_commision(trade) / (trade.orderStatus.avgFillPrice * trade.order.totalQuantity)
+            },
+            'info': {},
+            'leverage': leverage
+        }
+
+        return order
 
     def create_order(
         self,
@@ -989,61 +1135,51 @@ class InteractiveBroker:
                 pair, ordertype, side, amount, self.price_to_precision(pair, rate), leverage)
             return dry_order
 
-        params = self._get_params(side, ordertype, leverage, reduceOnly, time_in_force)
+        # Set the precision for amount and price(rate) as accepted by the exchange
+        amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
+        needs_price = self._order_needs_price(ordertype)
+        rate_for_order = self.price_to_precision(pair, rate) if needs_price else None
+
+        if not reduceOnly:
+            self._lev_prep(pair, leverage, side)
+
+        if ordertype == 'market':
+            order = MarketOrder(side.upper(), amount)
+        elif ordertype == 'limit':
+            order = LimitOrder(side.upper(), amount, rate_for_order)
+        else:
+            raise OperationalException(f'Ordertype is not supported {ordertype}')
+        order.tif = time_in_force
+        order.outsideRth = True
+
+        contract = self._create_contract(pair)
 
         try:
-            # Set the precision for amount and price(rate) as accepted by the exchange
-            amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
-            needs_price = self._order_needs_price(ordertype)
-            rate_for_order = self.price_to_precision(pair, rate) if needs_price else None
-
-            if not reduceOnly:
-                self._lev_prep(pair, leverage, side)
-
-            order = self._api.create_order(
-                pair,
-                ordertype,
-                side,
-                amount,
-                rate_for_order,
-                params,
-            )
-            if order.get('status') is None:
-                # Map empty status to open.
-                order['status'] = 'open'
-
-            if order.get('type') is None:
-                order['type'] = ordertype
-
-            self._log_exchange_response('create_order', order)
-            order = self._order_contracts_to_amount(order)
-            return order
-
-        except ccxt.InsufficientFunds as e:
-            raise InsufficientFundsError(
-                f'Insufficient funds to create {ordertype} {side} order on market {pair}. '
-                f'Tried to {side} amount {amount} at rate {rate}.'
-                f'Message: {e}') from e
-        except ccxt.InvalidOrder as e:
-            raise InvalidOrderException(
-                f'Could not create {ordertype} {side} order on market {pair}. '
-                f'Tried to {side} amount {amount} at rate {rate}. '
-                f'Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+            trade = self._api.placeOrder(contract, order)
+        except ConnectionRefusedError as e:
             raise TemporaryError(
-                f'Could not place {side} order due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
+
+        # Format for freqtrade
+        order = self._format_ib_order(trade, pair, leverage, ordertype)
+
+        if order.get('status') is None:
+            # Map empty status to open.
+            order['status'] = 'open'
+
+        if order.get('type') is None:
+            order['type'] = ordertype
+
+        self._log_exchange_response('create_order', order)
+        order = self._order_contracts_to_amount(order)
+        return order
 
     def stoploss_adjust(self, stop_loss: float, order: Dict, side: str) -> bool:
         """
         Verify stop_loss against stoploss-order value (limit or price)
         Returns True if adjustment is necessary.
         """
-        if not self._ft_has.get('stoploss_on_exchange'):
-            raise OperationalException(f"stoploss is not implemented for {self.name}.")
+        # stopLossPrice
         price_param = self._ft_has['stop_price_prop']
         return (
             order.get(price_param, None) is None
@@ -1134,69 +1270,57 @@ class InteractiveBroker:
             )
             return dry_order
 
+        params = self._get_stop_params(side=side, ordertype=ordertype,
+                                        stop_price=stop_price_norm)
+        # Only SPOT
+        # if self.trading_mode == TradingMode.FUTURES:
+        #     params['reduceOnly'] = True
+        #     if 'stoploss_price_type' in order_types and 'stop_price_type_field' in self._ft_has:
+        #         price_type = self._ft_has['stop_price_type_value_mapping'][
+        #             order_types.get('stoploss_price_type', PriceType.LAST)]
+        #         params[self._ft_has['stop_price_type_field']] = price_type
+
+        amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
+
+        self._lev_prep(pair, leverage, side, accept_fail=True)
+
+        contract = self._create_contract(pair)
+        order = StopOrder(side.upper(), amount, stop_price_norm)
+        order.outsideRth = True
+        
         try:
-            params = self._get_stop_params(side=side, ordertype=ordertype,
-                                           stop_price=stop_price_norm)
-            if self.trading_mode == TradingMode.FUTURES:
-                params['reduceOnly'] = True
-                if 'stoploss_price_type' in order_types and 'stop_price_type_field' in self._ft_has:
-                    price_type = self._ft_has['stop_price_type_value_mapping'][
-                        order_types.get('stoploss_price_type', PriceType.LAST)]
-                    params[self._ft_has['stop_price_type_field']] = price_type
-
-            amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
-
-            self._lev_prep(pair, leverage, side, accept_fail=True)
-            order = self._api.create_order(symbol=pair, type=ordertype, side=side,
-                                           amount=amount, price=limit_rate, params=params)
-            self._log_exchange_response('create_stoploss_order', order)
-            order = self._order_contracts_to_amount(order)
-            logger.info(f"stoploss {user_order_type} order added for {pair}. "
-                        f"stop price: {stop_price}. limit: {limit_rate}")
-            return order
-        except ccxt.InsufficientFunds as e:
-            raise InsufficientFundsError(
-                f'Insufficient funds to create {ordertype} sell order on market {pair}. '
-                f'Tried to sell amount {amount} at rate {limit_rate}. '
-                f'Message: {e}') from e
-        except ccxt.InvalidOrder as e:
-            # Errors:
-            # `Order would trigger immediately.`
-            raise InvalidOrderException(
-                f'Could not create {ordertype} sell order on market {pair}. '
-                f'Tried to sell amount {amount} at rate {limit_rate}. '
-                f'Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+            trade = self._api.placeOrder(contract, order)
+        except ConnectionRefusedError as e:
             raise TemporaryError(
-                f"Could not place stoploss order due to {e.__class__.__name__}. "
-                f"Message: {e}") from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
+
+        self._log_exchange_response('create_stoploss_order', order)
+        order = self._order_contracts_to_amount(order)
+        logger.info(f"stoploss {user_order_type} order added for {pair}. "
+                    f"stop price: {stop_price}. limit: {limit_rate}")
+        return order
 
     @retrier(retries=API_FETCH_ORDER_RETRY_COUNT)
     def fetch_order(self, order_id: str, pair: str, params: Dict = {}) -> Dict:
         if self._config['dry_run']:
             return self.fetch_dry_run_order(order_id)
         try:
-            order = self._api.fetch_order(order_id, pair, params=params)
+            open_trade = self._api.reqAllOpenOrders()
+
+            for t in open_trade:
+                if t.order.orderId == int(order_id):
+                    trade = t
+                    break
+            else:
+                raise InvalidOrderException(f"Couldn't find order id {order_id}")
+            
+            order = self._format_ib_order(trade)
             self._log_exchange_response('fetch_order', order)
             order = self._order_contracts_to_amount(order)
             return order
-        except ccxt.OrderNotFound as e:
-            raise RetryableOrderError(
-                f'Order not found (pair: {pair} id: {order_id}). Message: {e}') from e
-        except ccxt.InvalidOrder as e:
-            raise InvalidOrderException(
-                f'Tried to get an invalid order (pair: {pair} id: {order_id}). Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+        except ConnectionRefusedError as e:
             raise TemporaryError(
                 f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
 
     def fetch_stoploss_order(self, order_id: str, pair: str, params: Dict = {}) -> Dict:
         return self.fetch_order(order_id, pair, params)
@@ -1235,20 +1359,22 @@ class InteractiveBroker:
                 return {}
 
         try:
-            order = self._api.cancel_order(order_id, pair, params=params)
+            open_trade = self._api.reqAllOpenOrders()
+
+            for t in open_trade:
+                if t.order.orderId == int(order_id):
+                    trade = t
+                    break
+            else:
+                raise InvalidOrderException(f"Couldn't find order id {order_id}")
+            trade = self._api.cancelOrder(trade.order)
+            order = self._format_ib_order(trade)
             self._log_exchange_response('cancel_order', order)
             order = self._order_contracts_to_amount(order)
             return order
-        except ccxt.InvalidOrder as e:
-            raise InvalidOrderException(
-                f'Could not cancel order. Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+        except ConnectionRefusedError as e:
             raise TemporaryError(
-                f'Could not cancel order due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
     def cancel_stoploss_order(self, order_id: str, pair: str, params: Dict = {}) -> Dict:
         return self.cancel_order(order_id, pair, params)
@@ -1312,58 +1438,39 @@ class InteractiveBroker:
 
         return order
 
-    @retrier
-    def get_balances(self) -> dict:
+    # TODO make ib compat
+    # @retrier
+    # def get_balances(self) -> dict:
 
-        try:
-            balances = self._api.fetch_balance()
-            # Remove additional info from ccxt results
-            balances.pop("info", None)
-            balances.pop("free", None)
-            balances.pop("total", None)
-            balances.pop("used", None)
+    #     try:
+    #         account_summary = self._api.accountSummary()
+    #         available_funds = next((tag.value for tag in account_summary if tag.tag == 'AvailableFunds'), None)
 
-            return balances
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f'Could not get balance due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+    #         return balances
+    #     except ConnectionRefusedError as e:
+    #         raise TemporaryError(
+    #             f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
-    @retrier
-    def fetch_positions(self, pair: Optional[str] = None) -> List[Dict]:
-        """
-        Fetch positions from the exchange.
-        If no pair is given, all positions are returned.
-        :param pair: Pair for the query
-        """
-        if self._config['dry_run'] or self.trading_mode != TradingMode.FUTURES:
-            return []
-        try:
-            symbols = []
-            if pair:
-                symbols.append(pair)
-            positions: List[Dict] = self._api.fetch_positions(symbols)
-            self._log_exchange_response('fetch_positions', positions)
-            return positions
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f'Could not get positions due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
-
-    def _fetch_orders_emulate(self, pair: str, since_ms: int) -> List[Dict]:
-        orders = []
-        if self.exchange_has('fetchClosedOrders'):
-            orders = self._api.fetch_closed_orders(pair, since=since_ms)
-            if self.exchange_has('fetchOpenOrders'):
-                orders_open = self._api.fetch_open_orders(pair, since=since_ms)
-                orders.extend(orders_open)
-        return orders
+    # @retrier
+    # def fetch_positions(self, pair: Optional[str] = None) -> List[Dict]:
+    #     """
+    #     Fetch positions from the exchange.
+    #     If no pair is given, all positions are returned.
+    #     :param pair: Pair for the query
+    #     """
+    #     if self._config['dry_run'] or self.trading_mode != TradingMode.FUTURES:
+    #         return []
+    #     try:
+    #         self._api.positions()
+    #         symbols = []
+    #         if pair:
+    #             symbols.append(pair)
+    #         positions: List[Dict] = self._api.fetch_positions(symbols)
+    #         self._log_exchange_response('fetch_positions', positions)
+    #         return positions
+    #     except ConnectionRefusedError as e:
+    #         raise TemporaryError(
+    #             f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
     @retrier(retries=0)
     def fetch_orders(self, pair: str, since: datetime, params: Optional[Dict] = None) -> List[Dict]:
@@ -1375,30 +1482,22 @@ class InteractiveBroker:
         if self._config['dry_run']:
             return []
 
-        try:
-            since_ms = int((since.timestamp() - 10) * 1000)
+        orders = []
+        contract = self._create_contract(pair)
+        since_ms = int((since.timestamp() - 10) * 1000)
 
-            if self.exchange_has('fetchOrders'):
-                if not params:
-                    params = {}
-                try:
-                    orders: List[Dict] = self._api.fetch_orders(pair, since=since_ms, params=params)
-                except ccxt.NotSupported:
-                    # Some exchanges don't support fetchOrders
-                    # attempt to fetch open and closed orders separately
-                    orders = self._fetch_orders_emulate(pair, since_ms)
-            else:
-                orders = self._fetch_orders_emulate(pair, since_ms)
-            self._log_exchange_response('fetch_orders', orders)
-            orders = [self._order_contracts_to_amount(o) for o in orders]
-            return orders
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f'Could not fetch positions due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+        filter_trade = [
+            t for t in self._api.trades() 
+            if t.log 
+            and dt_ts(t.log[0].time) >= since_ms
+            and t.contract.symbol == contract.symbol
+            ]
+        
+        orders = [self._format_ib_order(t) for t in filter_trade]
+
+        self._log_exchange_response('fetch_orders', orders)
+        orders = [self._order_contracts_to_amount(o) for o in orders]
+        return orders
 
     @retrier
     def fetch_trading_fees(self) -> Dict[str, Any]:
@@ -1406,50 +1505,8 @@ class InteractiveBroker:
         Fetch user account trading fees
         Can be cached, should not update often.
         """
-        if (self._config['dry_run'] or self.trading_mode != TradingMode.FUTURES
-                or not self.exchange_has('fetchTradingFees')):
-            return {}
-        try:
-            trading_fees: Dict[str, Any] = self._api.fetch_trading_fees()
-            self._log_exchange_response('fetch_trading_fees', trading_fees)
-            return trading_fees
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f'Could not fetch trading fees due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
-
-    @retrier
-    def fetch_bids_asks(self, symbols: Optional[List[str]] = None, cached: bool = False) -> Dict:
-        """
-        :param cached: Allow cached result
-        :return: fetch_tickers result
-        """
-        if not self.exchange_has('fetchBidsAsks'):
-            return {}
-        if cached:
-            with self._cache_lock:
-                tickers = self._fetch_tickers_cache.get('fetch_bids_asks')
-            if tickers:
-                return tickers
-        try:
-            tickers = self._api.fetch_bids_asks(symbols)
-            with self._cache_lock:
-                self._fetch_tickers_cache['fetch_bids_asks'] = tickers
-            return tickers
-        except ccxt.NotSupported as e:
-            raise OperationalException(
-                f'Exchange {self._api.name} does not support fetching bids/asks in batch. '
-                f'Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f'Could not load bids/asks due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+        # ONLY SPOT
+        return {}
 
     @retrier
     def get_tickers(self, symbols: Optional[List[str]] = None, cached: bool = False) -> Tickers:
@@ -1458,88 +1515,85 @@ class InteractiveBroker:
         :return: fetch_tickers result
         """
         tickers: Tickers
-        if not self.exchange_has('fetchTickers'):
-            return {}
         if cached:
             with self._cache_lock:
                 tickers = self._fetch_tickers_cache.get('fetch_tickers')  # type: ignore
             if tickers:
                 return tickers
         try:
-            tickers = self._api.fetch_tickers(symbols)
+            contract = [self._create_contract(p) for p in symbols]
+
+            ib_tickers = self._api.reqTickers(*contract)
+
+            # format IB
+            tickers = [
+                {
+                    'symbol': self._symbol_to_pair(t.contract.symbol),
+                    'ask': t.ask,
+                    'askVolume': t.askSize,
+                    'bid': t.bid,
+                    'bidVolume': t.bidSize
+                } for t in ib_tickers
+            ]
+            
             with self._cache_lock:
                 self._fetch_tickers_cache['fetch_tickers'] = tickers
             return tickers
-        except ccxt.NotSupported as e:
-            raise OperationalException(
-                f'Exchange {self._api.name} does not support fetching tickers in batch. '
-                f'Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+        except ConnectionRefusedError as e:
             raise TemporaryError(
-                f'Could not load tickers due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
     # Pricing info
-
     @retrier
     def fetch_ticker(self, pair: str) -> Ticker:
         try:
-            if (pair not in self.markets or
-                    self.markets[pair].get('active', False) is False):
-                raise ExchangeError(f"Pair {pair} not available")
-            data: Ticker = self._api.fetch_ticker(pair)
-            return data
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+            contract = [self._create_contract(p)]
+
+            t = self._api.reqTickers(*contract)[0]
+
+            # format IB
+            tickers = {
+                'symbol': self._symbol_to_pair(t.contract.symbol),
+                'ask': t.ask,
+                'askVolume': t.askSize,
+                'bid': t.bid,
+                'bidVolume': t.bidSize
+            }
+            
+            return tickers
+
+        except ConnectionRefusedError as e:
             raise TemporaryError(
-                f'Could not load ticker due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
-    @staticmethod
-    def get_next_limit_in_list(limit: int, limit_range: Optional[List[int]],
-                               range_required: bool = True):
-        """
-        Get next greater value in the list.
-        Used by fetch_l2_order_book if the api only supports a limited range
-        """
-        if not limit_range:
-            return limit
-
-        result = min([x for x in limit_range if limit <= x] + [max(limit_range)])
-        if not range_required and limit > result:
-            # Range is not required - we can use None as parameter.
-            return None
-        return result
 
     @retrier
-    def fetch_l2_order_book(self, pair: str, limit: int = 100) -> OrderBook:
+    def fetch_l2_order_book(self, pair: str, limit: int = 5) -> OrderBook:
         """
         Get L2 order book from exchange.
         Can be limited to a certain amount (if supported).
         Returns a dict in the format
         {'asks': [price, volume], 'bids': [price, volume]}
         """
-        limit1 = self.get_next_limit_in_list(limit, self._ft_has['l2_limit_range'],
-                                             self._ft_has['l2_limit_range_required'])
         try:
+            contract = self._create_contract(pair)
+            tickers = self._api.reqMktDepth(contract, numRows=limit)
 
-            return self._api.fetch_l2_order_book(pair, limit1)
-        except ccxt.NotSupported as e:
-            raise OperationalException(
-                f'Exchange {self._api.name} does not support fetching order book.'
-                f'Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+            # Format for freqtrade
+            bid = [(bid.price, bid.size) for bid in tickers.domBids]
+            ask = [(ask.price, ask.size) for ask in tickers.domBids]
+
+            order_book = OrderBook(
+                symbol=pair,
+                bids=bid,
+                ask=ask
+            )
+            return order_book
+        
+        # NOTE Currently accept all IB exception
+        except ConnectionRefusedError as e:
             raise TemporaryError(
-                f'Could not get order book due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
     def _get_price_side(self, side: str, is_short: bool, conf_strategy: Dict) -> BidAsk:
         price_side = conf_strategy['price_side']
@@ -1723,7 +1777,6 @@ class InteractiveBroker:
     def get_order_id_conditional(self, order: Dict[str, Any]) -> str:
         return order['id']
 
-    @retrier
     def get_fee(self, symbol: str, type: str = '', side: str = '', amount: float = 1,
                 price: float = 1, taker_or_maker: MakerTaker = 'maker') -> float:
         """
@@ -1735,24 +1788,22 @@ class InteractiveBroker:
         :param price: Price of order
         :param taker_or_maker: 'maker' or 'taker' (ignored if "type" is provided)
         """
-        if type and type == 'market':
-            taker_or_maker = 'taker'
-        try:
-            if self._config['dry_run'] and self._config.get('fee', None) is not None:
-                return self._config['fee']
-            # validate that markets are loaded before trying to get fee
-            if self._api.markets is None or len(self._api.markets) == 0:
-                self._api.load_markets(params={})
+        
+        # NOTE https://www.interactivebrokers.com/en/pricing/commissions-stocks.php
 
-            return self._api.calculate_fee(symbol=symbol, type=type, side=side, amount=amount,
-                                           price=price, takerOrMaker=taker_or_maker)['rate']
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f'Could not get fee info due to {e.__class__.__name__}. Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+        contract = self._create_contract(symbol)
+        # create order
+        order = Order()
+        order.action = 'BUY'
+        order.orderType = 'LMT'
+        order.totalQuantity = amount
+        order.lmtPrice = price
+
+        return self._api.whatIfOrder(
+            contract,
+            order
+        ).commission
+
 
     @staticmethod
     def order_has_fee(order: Dict) -> bool:
@@ -1847,54 +1898,56 @@ class InteractiveBroker:
         :param candle_type: '', mark, index, premiumIndex, or funding_rate
         :return: List with candle (OHLCV) data
         """
-        pair, _, _, data, _ = self.loop.run_until_complete(
-            self._async_get_historic_ohlcv(pair=pair, timeframe=timeframe,
-                                           since_ms=since_ms, until_ms=until_ms,
-                                           is_new_pair=is_new_pair, candle_type=candle_type))
+        # pair, _, _, data, _ = self.loop.run_until_complete(
+        #     self._async_get_historic_ohlcv(pair=pair, timeframe=timeframe,
+        #                                    since_ms=since_ms, until_ms=until_ms,
+        #                                    is_new_pair=is_new_pair, candle_type=candle_type))
+
+        def timedelta_to_duration_str(timedelta_obj):
+            seconds = int(timedelta_obj.total_seconds())
+            days = seconds // 86400
+            seconds %= 86400
+            months = days // 30
+            days %= 30
+            years = months // 12
+            months %= 12
+
+            if years > 0:
+                return f"{years} Y"
+            elif months > 0:
+                return f"{months} M"
+            elif days > 0:
+                return f"{days} D"
+            else:
+                return f"{seconds} S"
+            
+        def date_timestamp_ms(date):
+            date_time = datetime(date.year, date.month, date.day)
+
+            return date_time.timestamp() * 1000
+            
+        contract = self._create_contract(pair)
+        bar_size = self.timeframe_to_ib_format(timeframe)
+        since_datetime = datetime.fromtimestamp(since_ms / 1000)
+        end_datetime = datetime.fromtimestamp(until_ms / 1000) if until_ms else datetime.now()
+        duration = timedelta_to_duration_str(end_datetime - since_datetime)
+        
+        bars = self._api.reqHistoricalData(
+            contract,
+            endDateTime=end_datetime,
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow='TRADES',
+            useRTH=True
+        )
+
+        # Format for freqtrade
+        data = [
+            [date_timestamp_ms(d.date), d.open, d.high, d.low, d.close, d.volume] for d in bars    
+        ]
+
         logger.info(f"Downloaded data for {pair} with length {len(data)}.")
         return data
-
-    async def _async_get_historic_ohlcv(self, pair: str, timeframe: str,
-                                        since_ms: int, candle_type: CandleType,
-                                        is_new_pair: bool = False, raise_: bool = False,
-                                        until_ms: Optional[int] = None
-                                        ) -> OHLCVResponse:
-        """
-        Download historic ohlcv
-        :param is_new_pair: used by binance subclass to allow "fast" new pair downloading
-        :param candle_type: Any of the enum CandleType (must match trading mode!)
-        """
-
-        one_call = timeframe_to_msecs(timeframe) * self.ohlcv_candle_limit(
-            timeframe, candle_type, since_ms)
-        logger.debug(
-            "one_call: %s msecs (%s)",
-            one_call,
-            dt_humanize(dt_now() - timedelta(milliseconds=one_call), only_distance=True)
-        )
-        input_coroutines = [self._async_get_candle_history(
-            pair, timeframe, candle_type, since) for since in
-            range(since_ms, until_ms or dt_ts(), one_call)]
-
-        data: List = []
-        # Chunk requests into batches of 100 to avoid overwelming ccxt Throttling
-        for input_coro in chunks(input_coroutines, 100):
-
-            results = await asyncio.gather(*input_coro, return_exceptions=True)
-            for res in results:
-                if isinstance(res, Exception):
-                    logger.warning(f"Async code raised an exception: {repr(res)}")
-                    if raise_:
-                        raise
-                    continue
-                else:
-                    # Deconstruct tuple if it's not an exception
-                    p, _, c, new_data, _ = res
-                    if p == pair and c == candle_type:
-                        data.extend(new_data)
-        # Sort data again after extending the result - above calls return in "async order"
-        data = sorted(data, key=lambda x: x[0])
-        return pair, timeframe, candle_type, data, self._ohlcv_partial_candle
 
     def _build_coroutine(
             self, pair: str, timeframe: str, candle_type: CandleType,

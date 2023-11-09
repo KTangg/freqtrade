@@ -15,7 +15,7 @@ from freqtrade.data.converter import (clean_ohlcv_dataframe, convert_trades_to_o
 from freqtrade.data.history.idatahandler import IDataHandler, get_datahandler
 from freqtrade.enums import CandleType
 from freqtrade.exceptions import OperationalException
-from freqtrade.exchange import Exchange
+from freqtrade.exchange import Exchange, InteractiveBroker
 from freqtrade.plugins.pairlist.pairlist_helpers import dynamic_expand_pairlist
 from freqtrade.util import dt_ts, format_ms_time
 from freqtrade.util.binance_mig import migrate_binance_futures_data
@@ -189,7 +189,7 @@ def _load_cached_data_for_updating(
 
 def _download_pair_history(pair: str, *,
                            datadir: Path,
-                           exchange: Exchange,
+                           exchange: InteractiveBroker,
                            timeframe: str = '5m',
                            process: str = '',
                            new_pairs_days: int = 30,
@@ -276,7 +276,7 @@ def _download_pair_history(pair: str, *,
         return False
 
 
-def refresh_backtest_ohlcv_data(exchange: Exchange, pairs: List[str], timeframes: List[str],
+def refresh_backtest_ohlcv_data(exchange: InteractiveBroker, pairs: List[str], timeframes: List[str],
                                 datadir: Path, trading_mode: str,
                                 timerange: Optional[TimeRange] = None,
                                 new_pairs_days: int = 30, erase: bool = False,
@@ -293,7 +293,9 @@ def refresh_backtest_ohlcv_data(exchange: Exchange, pairs: List[str], timeframes
     candle_type = CandleType.get_default(trading_mode)
     process = ''
     for idx, pair in enumerate(pairs, start=1):
-        if pair not in exchange.markets:
+        try:
+            exchange.validate_pairs([pair])
+        except OperationalException as e:
             pairs_not_available.append(pair)
             logger.info(f"Skipping pair {pair}...")
             continue
@@ -484,13 +486,15 @@ def download_data_main(config: Config) -> None:
     # Init exchange
     from freqtrade.resolvers.exchange_resolver import ExchangeResolver
     exchange = ExchangeResolver.load_exchange(config, validate=False)
-    available_pairs = [
-        p for p in exchange.get_markets(
-            tradable_only=True, active_only=not config.get('include_inactive')
-            ).keys()
-    ]
+    # available_pairs = [
+    #     p for p in exchange.get_markets(
+    #         tradable_only=True, active_only=not config.get('include_inactive')
+    #         ).keys()
+    # ]
 
-    expanded_pairs = dynamic_expand_pairlist(config, available_pairs)
+    # expanded_pairs = dynamic_expand_pairlist(config, available_pairs)
+    expanded_pairs = config['pairs']
+
     if 'timeframes' not in config:
         config['timeframes'] = DL_DATA_TIMEFRAMES
 
@@ -527,7 +531,6 @@ def download_data_main(config: Config) -> None:
                     "Please use `--dl-trades` instead for this exchange "
                     "(will unfortunately take a long time)."
                     )
-            migrate_binance_futures_data(config)
             pairs_not_available = refresh_backtest_ohlcv_data(
                 exchange, pairs=expanded_pairs, timeframes=config['timeframes'],
                 datadir=config['datadir'], timerange=timerange,

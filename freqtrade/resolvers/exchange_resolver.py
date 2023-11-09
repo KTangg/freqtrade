@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import freqtrade.exchange as exchanges
 from freqtrade.constants import Config, ExchangeConfig
-from freqtrade.exchange import MAP_EXCHANGE_CHILDCLASS, Exchange
+from freqtrade.exchange import MAP_EXCHANGE_CHILDCLASS, Exchange, InteractiveBroker
 from freqtrade.resolvers import IResolver
 
 
@@ -28,25 +28,8 @@ class ExchangeResolver(IResolver):
         :param exchange_name: name of the Exchange to load
         :param config: configuration dictionary
         """
-        exchange_name: str = config['exchange']['name']
         # Map exchange name to avoid duplicate classes for identical exchanges
-        exchange_name = MAP_EXCHANGE_CHILDCLASS.get(exchange_name, exchange_name)
-        exchange_name = exchange_name.title()
-        exchange = None
-        try:
-            exchange = ExchangeResolver._load_exchange(
-                exchange_name,
-                kwargs={
-                    'config': config,
-                    'validate': validate,
-                    'exchange_config': exchange_config,
-                    'load_leverage_tiers': load_leverage_tiers}
-            )
-        except ImportError:
-            logger.info(
-                f"No {exchange_name} specific subclass found. Using the generic class instead.")
-        if not exchange:
-            exchange = Exchange(config, validate=validate, exchange_config=exchange_config,)
+        exchange = InteractiveBroker(config, validate=validate, exchange_config=exchange_config,)
         return exchange
 
     @staticmethod

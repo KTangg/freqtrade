@@ -15,6 +15,7 @@ def expand_pairlist(wildcardpl: List[str], available_pairs: List[str],
     :return: expanded pairlist, with Regexes from wildcardpl applied to match all available pairs.
     :raises: ValueError if a wildcard is invalid (like '*/BTC' - which should be `.*/BTC`)
     """
+
     result = []
     if keep_invalid:
         for pair_wc in wildcardpl:
