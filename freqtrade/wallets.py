@@ -9,7 +9,7 @@ from typing import Dict, NamedTuple, Optional
 from freqtrade.constants import UNLIMITED_STAKE_AMOUNT, Config
 from freqtrade.enums import RunMode, TradingMode
 from freqtrade.exceptions import DependencyException
-from freqtrade.exchange import Exchange
+from freqtrade.exchange import Exchange, InteractiveBroker
 from freqtrade.misc import safe_value_fallback
 from freqtrade.persistence import LocalTrade, Trade
 from freqtrade.util.datetime_helpers import dt_now
@@ -36,7 +36,7 @@ class PositionWallet(NamedTuple):
 
 class Wallets:
 
-    def __init__(self, config: Config, exchange: Exchange, log: bool = True) -> None:
+    def __init__(self, config: Config, exchange: InteractiveBroker, log: bool = True) -> None:
         self._config = config
         self._log = log
         self._exchange = exchange

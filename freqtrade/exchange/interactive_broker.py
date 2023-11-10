@@ -7,7 +7,7 @@ import inspect
 import logging
 import signal
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from math import floor
 from threading import Lock
 from typing import Any, Coroutine, Dict, List, Literal, Optional, Tuple, Union
@@ -1438,39 +1438,59 @@ class InteractiveBroker:
 
         return order
 
-    # TODO make ib compat
-    # @retrier
-    # def get_balances(self) -> dict:
+    @retrier
+    def get_balances(self) -> dict:
 
-    #     try:
-    #         account_summary = self._api.accountSummary()
-    #         available_funds = next((tag.value for tag in account_summary if tag.tag == 'AvailableFunds'), None)
+        currency = 'USD'
+        balances = {
+            'USD': {
+                'free':     0,
+                'used':     0,
+                'total':    0
+            }
+        }
+        try:
+            account_values= self._api.accountValues()
+            for av in account_values:
+                if av.currency == currency:
+                    if av.tag == 'CashBalance':
+                        balances[currency]['total'] = float(av.value)
+                    elif av.tag == 'AvailableFunds':
+                        balances[currency]['free'] = float(av.value)
+                    # You can add more tags based on your needs
 
-    #         return balances
-    #     except ConnectionRefusedError as e:
-    #         raise TemporaryError(
-    #             f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
+                # Calculate 'used' as (total - free)
+                for currency in balances:
+                    if currency not in ['info']:  # Skip the 'info' key
+                        balances[currency]['used'] = (
+                            balances[currency]['total'] - balances[currency]['free']
+                        )
 
-    # @retrier
-    # def fetch_positions(self, pair: Optional[str] = None) -> List[Dict]:
-    #     """
-    #     Fetch positions from the exchange.
-    #     If no pair is given, all positions are returned.
-    #     :param pair: Pair for the query
-    #     """
-    #     if self._config['dry_run'] or self.trading_mode != TradingMode.FUTURES:
-    #         return []
-    #     try:
-    #         self._api.positions()
-    #         symbols = []
-    #         if pair:
-    #             symbols.append(pair)
-    #         positions: List[Dict] = self._api.fetch_positions(symbols)
-    #         self._log_exchange_response('fetch_positions', positions)
-    #         return positions
-    #     except ConnectionRefusedError as e:
-    #         raise TemporaryError(
-    #             f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
+            return balances
+        except ConnectionRefusedError as e:
+            raise TemporaryError(
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
+
+    @retrier
+    def fetch_positions(self, pair: Optional[str] = None) -> List[Dict]:
+        """
+        Fetch positions from the exchange.
+        If no pair is given, all positions are returned.
+        :param pair: Pair for the query
+        """
+        if self._config['dry_run'] or self.trading_mode != TradingMode.FUTURES:
+            return []
+        try:
+            self._api.positions()
+            symbols = []
+            if pair:
+                symbols.append(pair)
+            positions: List[Dict] = self._api.fetch_positions(symbols)
+            self._log_exchange_response('fetch_positions', positions)
+            return positions
+        except ConnectionRefusedError as e:
+            raise TemporaryError(
+                f'Could not get order due to {e.__class__.__name__}. Message: {e}') from e
 
     @retrier(retries=0)
     def fetch_orders(self, pair: str, since: datetime, params: Optional[Dict] = None) -> List[Dict]:
@@ -1798,11 +1818,17 @@ class InteractiveBroker:
         order.orderType = 'LMT'
         order.totalQuantity = amount
         order.lmtPrice = price
+        order.whatIf = True
 
-        return self._api.whatIfOrder(
+        what_if = self._api.whatIfOrder(
             contract,
             order
-        ).commission
+        )
+
+        if not what_if.commissionCurrency:
+            return 0
+        
+        return what_if.commission
 
 
     @staticmethod
@@ -1906,23 +1932,22 @@ class InteractiveBroker:
         def timedelta_to_duration_str(timedelta_obj):
             seconds = int(timedelta_obj.total_seconds())
             days = seconds // 86400
-            seconds %= 86400
             months = days // 30
-            days %= 30
             years = months // 12
-            months %= 12
 
             if years > 0:
                 return f"{years} Y"
-            elif months > 0:
-                return f"{months} M"
             elif days > 0:
                 return f"{days} D"
             else:
                 return f"{seconds} S"
             
-        def date_timestamp_ms(date):
-            date_time = datetime(date.year, date.month, date.day)
+        def date_timestamp_ms(date_obj: date | datetime):
+
+            if type(date_obj) is date:
+                date_time = datetime(date_obj.year, date_obj.month, date_obj.day)
+            else:
+                date_time = date_obj
 
             return date_time.timestamp() * 1000
             
@@ -1938,7 +1963,7 @@ class InteractiveBroker:
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow='TRADES',
-            useRTH=True
+            useRTH=False
         )
 
         # Format for freqtrade
