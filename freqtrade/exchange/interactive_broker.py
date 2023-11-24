@@ -740,7 +740,6 @@ class InteractiveBroker:
         # NOTE this will only round down the price
         return int(price / price_increment) * price_increment
 
-    # TODO IB compat
     def price_get_one_pip(self, pair: str, price: float) -> float:
         """
         Get's the "1 pip" value for this pair.
@@ -1577,7 +1576,8 @@ class InteractiveBroker:
                 'ask': t.ask,
                 'askVolume': t.askSize,
                 'bid': t.bid,
-                'bidVolume': t.bidSize
+                'bidVolume': t.bidSize,
+                'last': t.last
             }
             
             return tickers
@@ -1749,6 +1749,7 @@ class InteractiveBroker:
 
     # Fee handling
 
+    # TODO
     @retrier
     def get_trades_for_order(self, order_id: str, pair: str, since: datetime,
                              params: Optional[Dict] = None) -> List:

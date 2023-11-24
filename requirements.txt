@@ -62,3 +62,8 @@ janus==1.0.0
 
 ast-comments==1.1.0
 packaging==23.1
+
+#Interactive broker
+eventkit==1.0.1
+ib-insync==0.9.86
+nest-asyncio==1.5.8

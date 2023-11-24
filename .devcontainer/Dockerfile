@@ -1,22 +1,27 @@
-FROM freqtradeorg/freqtrade:develop_freqairl
+FROM python:3.11.4-slim-bullseye
 
-USER root
-# Install dependencies
-COPY requirements-dev.txt /freqtrade/
 
-RUN apt-get update \
-    && apt-get -y install --no-install-recommends apt-utils dialog \
-    && apt-get -y install --no-install-recommends git sudo vim build-essential \
-    && apt-get clean \
-    && mkdir -p /home/ftuser/.vscode-server /home/ftuser/.vscode-server-insiders /home/ftuser/commandhistory \
-    && echo "export PROMPT_COMMAND='history -a'" >> /home/ftuser/.bashrc \
-    && echo "export HISTFILE=~/commandhistory/.bash_history" >> /home/ftuser/.bashrc \
-    && chown ftuser:ftuser -R /home/ftuser/.local/ \
-    && chown ftuser: -R /home/ftuser/
+RUN apt-get update && apt-get install -y git wget curl make python3-pip python3-venv python3-dev python3-pandas jq
 
-USER ftuser
+COPY . /workspaces
 
-RUN pip install --user autopep8 -r docs/requirements-docs.txt -r requirements-dev.txt --no-cache-dir
+WORKDIR /workspaces
 
-# Empty the ENTRYPOINT to allow all commands
-ENTRYPOINT []
+# RUN ./build_helpers/install_ta-lib.sh
+
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar xvzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib && \
+    sed -i.bak "s|0.00000001|0.000000000000000001 |g" src/ta_func/ta_utility.h &&\
+    ./configure --prefix=/usr/local --build=aarch64-unknown-linux-gnu &&\
+    make &&\
+    make install &&\
+    # On debian based systems (debian, ubuntu, ...) - updating ldconfig might be necessary.
+    ldconfig  &&\
+    cd .. &&\ 
+    rm -rf ./ta-lib* 
+
+RUN python3 -m pip install --upgrade pip && python3 -m pip install -r requirements.txt --no-cache-dir
+RUN python3 -m pip install -e .
+
+CMD [ "freqtrade", "trade" ]
