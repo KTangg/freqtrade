@@ -944,7 +944,6 @@ class LocalTrade:
         :return: Profit structure, containing absolute and relative profits.
         """
 
-        print(f'Calculare: rate {rate}, amount {amount}, open_rate {open_rate}')
         close_trade_value = self.calc_close_trade_value(rate, amount)
         if amount is None or open_rate is None:
             open_trade_value = self.open_trade_value
