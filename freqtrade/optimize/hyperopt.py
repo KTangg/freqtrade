@@ -555,8 +555,8 @@ class Hyperopt:
         self.prepare_hyperopt_data()
 
         # We don't need exchange instance anymore while running hyperopt
-        self.backtesting.exchange.close()
-        self.backtesting.exchange._api = None
+        # self.backtesting.exchange.close()
+        # self.backtesting.exchange._api = None
         self.backtesting.exchange._api_async = None
         self.backtesting.exchange.loop = None  # type: ignore
         self.backtesting.exchange._loop_lock = None  # type: ignore
