@@ -1951,25 +1951,71 @@ class InteractiveBroker:
                 date_time = date_obj
 
             return date_time.timestamp() * 1000
+        
+        def bar_size_to_seconds(bar_size: str) -> int:
+            """
+            Convert an IB bar size string to the total number of seconds.
+
+            :param bar_size: The size of each bar in IB format (e.g., '1 day', '5 mins').
+            :return: The total number of seconds for the given bar size.
+            """
+            time_value, time_unit = bar_size.split()
+
+            if 'sec' in time_unit:
+                return int(time_value)
+            elif 'min' in time_unit:
+                return int(time_value) * 60
+            elif 'hour' in time_unit:
+                return int(time_value) * 3600
+            elif 'day' in time_unit:
+                return int(time_value) * 86400
+            elif 'week' in time_unit:
+                return int(time_value) * 604800
+            elif 'month' in time_unit:
+                # Assuming an average month duration of 30.44 days
+                return int(time_value) * 2629743
+
+            raise ValueError(f"Invalid bar size format: {bar_size}")
+
+        
+        def calculate_chunk_duration(since_datetime: datetime, until_datetime: datetime, bar_size: str):
+            max_bars = 1000
+            seconds_per_bar = bar_size_to_seconds(bar_size)
+            max_duration_seconds = max_bars * seconds_per_bar
+            chunk_end_datetime = min(since_datetime + timedelta(seconds=max_duration_seconds), until_datetime)
+            duration_str = timedelta_to_duration_str(chunk_end_datetime - since_datetime)
+
+            return duration_str, chunk_end_datetime
             
         contract = self._create_contract(pair)
         bar_size = self.timeframe_to_ib_format(timeframe)
         since_datetime = datetime.fromtimestamp(since_ms / 1000)
-        end_datetime = datetime.fromtimestamp(until_ms / 1000) if until_ms else datetime.now()
-        duration = timedelta_to_duration_str(end_datetime - since_datetime)
+        until_datetime = datetime.fromtimestamp(until_ms / 1000) if until_ms else datetime.now()
+
+        all_bars = []
+        while since_datetime < until_datetime:
+            duration_str, chunk_end_datetime = calculate_chunk_duration(since_datetime, until_datetime, bar_size)
         
-        bars = self._api.reqHistoricalData(
-            contract,
-            endDateTime=end_datetime,
-            durationStr=duration,
-            barSizeSetting=bar_size,
-            whatToShow='TRADES',
-            useRTH=False
-        )
+            bars = self._api.reqHistoricalData(
+                contract,
+                endDateTime=chunk_end_datetime,
+                durationStr=duration_str,
+                barSizeSetting=bar_size,
+                whatToShow='TRADES',
+                useRTH=False
+            )
+
+            if not bars:
+                break
+
+            all_bars.extend(bars)
+            since_datetime = chunk_end_datetime
+
+            self._api.sleep(10)
 
         # Format for freqtrade
         data = [
-            [date_timestamp_ms(d.date), d.open, d.high, d.low, d.close, d.volume] for d in bars    
+            [date_timestamp_ms(d.date), d.open, d.high, d.low, d.close, d.volume] for d in all_bars    
         ]
 
         logger.info(f"Downloaded data for {pair} with length {len(data)}.")
