@@ -259,6 +259,7 @@ class InteractiveBroker:
         port = config.get('port', 4002)
         client_id = config.get('client_id', 'freqtrade')
         timeout = config.get('timeout', 10)
+        delay = config.get('delay', False)
 
         # NOTE current implement around NASDAQ exchange
         exchange = config.get('name', 'NASDAQ')
@@ -268,7 +269,8 @@ class InteractiveBroker:
             ib.connect(host=host, port=port, clientId=client_id, timeout=timeout)
             ib.name = exchange
             ib.primary_exchange = exchange
-            ib.reqMarketDataType(3)
+            if delay:
+                ib.reqMarketDataType(3)
         except Exception as e:
             # Handle any errors that arise during connection
             raise OperationalException(f"Initialization of IB failed. Reason: {e}") from e
@@ -2047,12 +2049,17 @@ class InteractiveBroker:
             since_ms = int((now - timedelta(seconds=move_to // 1000)).timestamp() * 1000)
 
         if since_ms:
-            return self._async_get_historic_ohlcv(
-                pair, timeframe, since_ms=since_ms, raise_=True, candle_type=candle_type)
-        else:
-            # One call ... "regular" refresh
-            return self._async_get_candle_history(
+            data = self.get_historic_ohlcv(
                 pair, timeframe, since_ms=since_ms, candle_type=candle_type)
+        else:
+            # If do not specified since ms use 30 minute ago
+            since_ms = int((datetime.now() - timedelta(minutes=30)).timestamp() * 1000)
+            # One call ... "regular" refresh
+            data = self.get_historic_ohlcv(
+                pair, timeframe, since_ms=since_ms, candle_type=candle_type)
+            
+        return (pair, timeframe, candle_type, data)
+        
 
     def _build_ohlcv_dl_jobs(
             self, pair_list: ListPairsWithTimeframes, since_ms: Optional[int],
@@ -2060,7 +2067,7 @@ class InteractiveBroker:
         """
         Build Coroutines to execute as part of refresh_latest_ohlcv
         """
-        input_coroutines: List[Coroutine[Any, Any, OHLCVResponse]] = []
+        results: List = []
         cached_pairs = []
         for pair, timeframe, candle_type in set(pair_list):
             if (timeframe not in self.timeframes
@@ -2074,7 +2081,7 @@ class InteractiveBroker:
             if ((pair, timeframe, candle_type) not in self._klines or not cache
                     or self._now_is_time_to_refresh(pair, timeframe, candle_type)):
 
-                input_coroutines.append(
+                results.append(
                     self._build_coroutine(pair, timeframe, candle_type, since_ms, cache))
 
             else:
@@ -2083,7 +2090,7 @@ class InteractiveBroker:
                 )
                 cached_pairs.append((pair, timeframe, candle_type))
 
-        return input_coroutines, cached_pairs
+        return results, cached_pairs
 
     def _process_ohlcv_df(self, pair: str, timeframe: str, c_type: CandleType, ticks: List[List],
                           cache: bool, drop_incomplete: bool) -> DataFrame:
@@ -2127,28 +2134,37 @@ class InteractiveBroker:
         logger.debug("Refreshing candle (OHLCV) data for %d pairs", len(pair_list))
 
         # Gather coroutines to run
-        input_coroutines, cached_pairs = self._build_ohlcv_dl_jobs(pair_list, since_ms, cache)
+        
+        results, cached_pairs = self._build_ohlcv_dl_jobs(pair_list, since_ms, cache)
 
         results_df = {}
         # Chunk requests into batches of 100 to avoid overwelming ccxt Throttling
-        for input_coro in chunks(input_coroutines, 100):
-            async def gather_stuff():
-                return await asyncio.gather(*input_coro, return_exceptions=True)
+        for res in results:
+            # Deconstruct tuple (has 5 elements)
+            pair, timeframe, c_type, ticks = res
+            drop_incomplete_ = True if drop_incomplete is None else drop_incomplete
+            ohlcv_df = self._process_ohlcv_df(
+                pair, timeframe, c_type, ticks, cache, drop_incomplete_)
 
-            with self._loop_lock:
-                results = self.loop.run_until_complete(gather_stuff())
+            results_df[(pair, timeframe, c_type)] = ohlcv_df
+        # for input_coro in chunks(input_coroutines, 100):
+        #     async def gather_stuff():
+        #         return await asyncio.gather(*input_coro, return_exceptions=True)
 
-            for res in results:
-                if isinstance(res, Exception):
-                    logger.warning(f"Async code raised an exception: {repr(res)}")
-                    continue
-                # Deconstruct tuple (has 5 elements)
-                pair, timeframe, c_type, ticks, drop_hint = res
-                drop_incomplete_ = drop_hint if drop_incomplete is None else drop_incomplete
-                ohlcv_df = self._process_ohlcv_df(
-                    pair, timeframe, c_type, ticks, cache, drop_incomplete_)
+        #     with self._loop_lock:
+        #         results = self.loop.run_until_complete(gather_stuff())
 
-                results_df[(pair, timeframe, c_type)] = ohlcv_df
+        #     for res in results:
+        #         if isinstance(res, Exception):
+        #             logger.warning(f"Async code raised an exception: {repr(res)}")
+        #             continue
+        #         # Deconstruct tuple (has 5 elements)
+        #         pair, timeframe, c_type, ticks, drop_hint = res
+        #         drop_incomplete_ = drop_hint if drop_incomplete is None else drop_incomplete
+        #         ohlcv_df = self._process_ohlcv_df(
+        #             pair, timeframe, c_type, ticks, cache, drop_incomplete_)
+
+        #         results_df[(pair, timeframe, c_type)] = ohlcv_df
 
         # Return cached klines
         for pair, timeframe, c_type in cached_pairs:
@@ -2166,71 +2182,6 @@ class InteractiveBroker:
         # current,active candle open date
         now = int(timeframe_to_prev_date(timeframe).timestamp())
         return plr < now
-
-    @retrier_async
-    async def _async_get_candle_history(
-        self,
-        pair: str,
-        timeframe: str,
-        candle_type: CandleType,
-        since_ms: Optional[int] = None,
-    ) -> OHLCVResponse:
-        """
-        Asynchronously get candle history data using fetch_ohlcv
-        :param candle_type: '', mark, index, premiumIndex, or funding_rate
-        returns tuple: (pair, timeframe, ohlcv_list)
-        """
-        try:
-            # Fetch OHLCV asynchronously
-            s = '(' + dt_from_ts(since_ms).isoformat() + ') ' if since_ms is not None else ''
-            logger.debug(
-                "Fetching pair %s, %s, interval %s, since %s %s...",
-                pair, candle_type, timeframe, since_ms, s
-            )
-            params = deepcopy(self._ft_has.get('ohlcv_params', {}))
-            candle_limit = self.ohlcv_candle_limit(
-                timeframe, candle_type=candle_type, since_ms=since_ms)
-
-            if candle_type and candle_type != CandleType.SPOT:
-                params.update({'price': candle_type.value})
-            if candle_type != CandleType.FUNDING_RATE:
-                data = await self._api_async.fetch_ohlcv(
-                    pair, timeframe=timeframe, since=since_ms,
-                    limit=candle_limit, params=params)
-            else:
-                # Funding rate
-                data = await self._fetch_funding_rate_history(
-                    pair=pair,
-                    timeframe=timeframe,
-                    limit=candle_limit,
-                    since_ms=since_ms,
-                )
-            # Some exchanges sort OHLCV in ASC order and others in DESC.
-            # Ex: Bittrex returns the list of OHLCV in ASC order (oldest first, newest last)
-            # while GDAX returns the list of OHLCV in DESC order (newest first, oldest last)
-            # Only sort if necessary to save computing time
-            try:
-                if data and data[0][0] > data[-1][0]:
-                    data = sorted(data, key=lambda x: x[0])
-            except IndexError:
-                logger.exception("Error loading %s. Result was %s.", pair, data)
-                return pair, timeframe, candle_type, [], self._ohlcv_partial_candle
-            logger.debug("Done fetching pair %s, %s interval %s...", pair, candle_type, timeframe)
-            return pair, timeframe, candle_type, data, self._ohlcv_partial_candle
-
-        except ccxt.NotSupported as e:
-            raise OperationalException(
-                f'Exchange {self._api.name} does not support fetching historical '
-                f'candle (OHLCV) data. Message: {e}') from e
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-            raise TemporaryError(f'Could not fetch historical candle (OHLCV) data '
-                                 f'for pair {pair} due to {e.__class__.__name__}. '
-                                 f'Message: {e}') from e
-        except ccxt.BaseError as e:
-            raise OperationalException(f'Could not fetch historical candle (OHLCV) data '
-                                       f'for pair {pair}. Message: {e}') from e
 
     async def _fetch_funding_rate_history(
         self,
