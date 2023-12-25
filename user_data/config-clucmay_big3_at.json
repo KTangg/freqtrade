@@ -1,0 +1,79 @@
+{
+  "max_open_trades": 1,
+  "stake_currency": "USDT",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 0.99,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "dry_run": true,
+  "dry_run_wallet": 10000,
+  "cancel_open_orders_on_exit": false,
+  "trading_mode": "spot",
+  "margin_mode": "",
+  "unfilledtimeout": {
+    "entry": 10,
+    "exit": 10,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "exchange": {
+    "name": "NASDAQ",
+    "host": "host.docker.internal",
+    "port": 4002,
+    "timeout": 10,
+    "client_id": "1",
+    "pair_whitelist": [
+      "AAPL/USD",
+      "MSFT/USD",
+      "GOOG/USD",
+      "AMZN/USD",
+      "NVDA/USD",
+      "TSLA/USD",
+      "AVGO/USD"
+    ]
+  },
+
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": ""
+  },
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 10009,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "da65ade9c931009eef29a43373ac18d0aca6dffc29821e572e50c9e0b590bae0",
+    "ws_token": "6NbfsWyXaoVmNq4zDtt3pjKzMB8FnEZSIA",
+    "CORS_origins": ["http://54.178.121.97"],
+    "username": "bunbot",
+    "password": "*VJopTbX4MSD1YSzYXOl"
+  },
+  "bot_name": "Nostop-Cluc-DCA-Bot",
+  "initial_state": "running",
+  "force_entry_enable": false,
+  "internals": {
+    "process_throttle_secs": 5
+  }
+}
