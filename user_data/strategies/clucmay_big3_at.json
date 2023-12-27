@@ -1,0 +1,30 @@
+{
+  "strategy_name": "ClucMayBig3At",
+  "params": {
+    "roi": {
+      "0": 999
+    },
+    "stoploss": {
+      "stoploss": -1.0
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {
+      "atr_mult": -5.8,
+      "cluc_mult": 0.970,
+      "atr_window": 25,
+      "max_epa": 2
+    },
+    "sell": {},
+    "protection": {}
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2023-11-29 10:10:38.986131+00:00"
+}
