@@ -128,7 +128,6 @@ class InteractiveBroker:
         self._fetch_tickers_cache: TTLCache = TTLCache(maxsize=2, ttl=60 * 10)
         # Cache values for 1800 to avoid frequent polling of the exchange for prices
         # Caching only applies to RPC methods, so prices for open trades are still
-        # refreshed once every iteration.
         self._exit_rate_cache: TTLCache = TTLCache(maxsize=100, ttl=1800)
         self._entry_rate_cache: TTLCache = TTLCache(maxsize=100, ttl=1800)
 
@@ -182,6 +181,8 @@ class InteractiveBroker:
             self._startup_candle_count: int = config.get('startup_candle_count', 0)
             self.required_candle_call_count = self.validate_required_startup_candles(
                 self._startup_candle_count, config.get('timeframe', ''))
+            
+        self.reload_markets()
 
 
     def __del__(self):
@@ -379,7 +380,6 @@ class InteractiveBroker:
             data = {
                 'min_size': contract_detail.minSize,
                 'size_increment': contract_detail.sizeIncrement,
-                'min_price': contract_detail.minPrice,
                 'price_increment': self._get_price_increment(contract_detail),
             }
 
