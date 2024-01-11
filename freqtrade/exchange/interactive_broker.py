@@ -7,26 +7,17 @@ import inspect
 import logging
 import signal
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone, date
+from datetime import date, datetime, timedelta, timezone
 from math import floor
 from threading import Lock
 from typing import Any, Coroutine, Dict, List, Literal, Optional, Tuple, Union
 
-from ib_insync import (
-    IB,
-    Contract,
-    ContractDetails,
-    Order,
-    Trade,
-    LimitOrder,
-    MarketOrder,
-    StopOrder
-)
 from cachetools import TTLCache
-
 # import ccxt.async_support as ccxt_async
-from ccxt import TICK_SIZE, DECIMAL_PLACES
+from ccxt import DECIMAL_PLACES, TICK_SIZE
 from dateutil import parser
+from ib_insync import (IB, Contract, ContractDetails, LimitOrder, MarketOrder, Order, StopOrder,
+                       Trade)
 from pandas import DataFrame, concat
 
 from freqtrade.constants import (DEFAULT_AMOUNT_RESERVE_PERCENT, NON_OPEN_EXCHANGE_STATES, BidAsk,
@@ -80,7 +71,7 @@ class InteractiveBroker:
         "stop_price_prop": "stopLossPrice",  # Used for stoploss_on_exchange response parsing
         "order_time_in_force": ["DAY", "GTC", "IOC", "GTD", "OPG", "FOK", "DTC"], # https://interactivebrokers.github.io/tws-api/classIBApi_1_1Order.html#a04f61266450f61c36fae22946c74a8f3
         "ohlcv_params": {},
-        "ohlcv_candle_limit": 500, # IB got 1000 limit in one call 
+        "ohlcv_candle_limit": 500, # IB got 1000 limit in one call
         "ohlcv_has_history": True,  # Some exchanges (Kraken) don't provide history via ohlcv
         "ohlcv_partial_candle": True,
         "ohlcv_require_since": False,
@@ -191,7 +182,7 @@ class InteractiveBroker:
             self._startup_candle_count: int = config.get('startup_candle_count', 0)
             self.required_candle_call_count = self.validate_required_startup_candles(
                 self._startup_candle_count, config.get('timeframe', ''))
-        
+
 
     def __del__(self):
         """
@@ -209,7 +200,7 @@ class InteractiveBroker:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop
-    
+
     @staticmethod
     def timeframe_to_ib_format(t: str) -> str:
         mapping = {
@@ -220,18 +211,18 @@ class InteractiveBroker:
         'w': ' week',
         'M': ' month'
         }
-        
+
         for key, value in mapping.items():
             if key in t:
                 # Handle singular cases like '1 sec' or '1 min'
                 if t == (f'1{key}'):
                     return t.replace(key, value.rstrip('s'))
                 return t.replace(key, value)
-        
+
         raise OperationalException(
             f'Invalid timeframe format {t} only support {list(mapping.keys())}'
         )
-        
+
 
     def validate_config(self, config):
         # Check if timeframe is available
@@ -307,15 +298,15 @@ class InteractiveBroker:
         # NOTE precision of TICK size is relied on each contract
         """exchange ccxt precisionMode"""
         return DECIMAL_PLACES
-    
+
     def is_open(self, contract: Contract) -> bool:
         self._api.reqMarketDataType(1)
-        
+
         market_data = self._api.reqMktData(contract)
 
         if market_data:
             return True
-        
+
         return False
 
     def additional_exchange_init(self) -> None:
@@ -363,19 +354,37 @@ class InteractiveBroker:
     def get_pair_base_currency(self, pair: str) -> str:
         """ Return a pair's base currency (base/quote:settlement) """
         return pair.split('/')[0]
-    
+
     def verify_contract(self, contract: Contract) -> bool:
         if not self._api.qualifyContracts(contract):
             return False
-        
+
         return True
-    
+
     def reload_markets(self):
         """
-        Dummy method
+        Load all essiantial market data about trading pairs.
         """
-        pass
-    
+        # Using static define pairs
+        self._markets = self._load_markets()
+
+    def _load_markets(self):
+        markets = {}
+        pairs = self._config['exchange']['pair_whitelist']
+
+        for p in pairs:
+            contract_detail = self._get_contract_detail(p)
+            data = {
+                'min_size': contract_detail.minSize,
+                'size_increment': contract_detail.sizeIncrement,
+                'min_price': contract_detail.minPrice,
+                'price_increment': self._get_price_increment(contract_detail),
+            }
+
+            # Add pair data to markets
+            markets[p] = data
+        return markets
+
     def _create_contract(self, pair: str) -> Contract:
         symbol = self.get_pair_base_currency(pair)
 
@@ -385,28 +394,32 @@ class InteractiveBroker:
             exchange='SMART',
             primaryExchange=self._api.primary_exchange
         )
-    
+
     def _get_contract_detail(self, pair: str) -> ContractDetails:
         contract = self._create_contract(pair)
-        
+
         l_detail = self._api.reqContractDetails(contract)
 
         if len(l_detail) == 0:
             raise ValueError(f"Couldn't get {pair} details from market")
-        
-        return l_detail[0]
-    
-    def contract_detail(self, pair: str, detail: str):
-        c = self._get_contract_detail(pair)
 
-        return getattr(c, detail)
+        return l_detail[0]
+
+    def _get_price_increment(self, contract_detail) -> float:
+        market_rule_ids = contract_detail.marketRuleIds
+        # NOTE marketRuleIds return str with comma sep
+        id = market_rule_ids.split(',')[0]
+        price_increment = self._api.reqMarketRule(id)[0]
+
+        return price_increment.increment
+
 
     def klines(self, pair_interval: PairWithTimeframe, copy: bool = True) -> DataFrame:
         if pair_interval in self._klines:
             return self._klines[pair_interval].copy() if copy else self._klines[pair_interval]
         else:
             return DataFrame()
-        
+
     def _symbol_to_pair(self, symbol: str) -> str:
         """
         Format IB symbol to pair
@@ -414,10 +427,10 @@ class InteractiveBroker:
         quote = self.get_quote_currencies()[0]
 
         return f'{symbol}/{quote}'.upper()
-    
+
     def get_markets(self) -> dict:
 
-        return {}
+        return self._markets
 
     # NOTE Only SPOT is support currently
     def get_contract_size(self, pair: str) -> Optional[float]:
@@ -433,7 +446,7 @@ class InteractiveBroker:
         # else:
         return 1
 
-    
+
     # TODO double check with more knowledge
     def _trades_contracts_to_amount(self, trades: List) -> List:
         if len(trades) > 0 and 'symbol' in trades[0]:
@@ -532,7 +545,7 @@ class InteractiveBroker:
                     f'Pair {pair} is not available on {self.name} {self.trading_mode.value}. '
                     f'Please remove {pair} from your whitelist.')
 
-            
+
             if (self._config['stake_currency'] and
                     self.get_pair_quote_currency(pair) != self._config['stake_currency']):
                 invalid_pairs.append(pair)
@@ -679,15 +692,6 @@ class InteractiveBroker:
             return 0
         # Otherwise, return the length of the decimal portion
         return len(parts[1])
-    
-    def _get_prize_increment(self, pair: str) -> float:
-        market_rule_ids = self.contract_detail(pair, 'marketRuleIds')
-
-        # NOTE marketRuleIds return str with comma sep
-        id = market_rule_ids.split(',')[0]
-        price_increment = self._api.reqMarketRule(id)[0]
-
-        return price_increment.increment
 
 
     # NOTE IB precision is based on contract
@@ -697,8 +701,8 @@ class InteractiveBroker:
         :param pair: Pair to get precision for
         :return: precision for amount or None. Must be used in combination with precisionMode
         """
-        
-        min_size = self.contract_detail(pair, 'sizeIncrement')
+
+        min_size = self._markets.get(pair, {}).get('min_size', None)
 
         return self.get_precision(min_size)
 
@@ -709,8 +713,8 @@ class InteractiveBroker:
         :param pair: Pair to get precision for
         :return: precision for price or None. Must be used in combination with precisionMode
         """
-        
-        price_tick = self._get_prize_increment(pair)
+
+        price_tick = self._markets.get(pair, {}).get('price_increment', None)
 
         return self.get_precision(price_tick)
 
@@ -718,8 +722,8 @@ class InteractiveBroker:
         """
         Returns the amount to buy or sell to a precision the Exchange accepts
         """
-        
-        size_increment = self.contract_detail(pair, 'sizeIncrement')
+
+        size_increment = self._markets.get(pair, {}).get('size_increment', None)
 
         # NOTE If order minsize is involve in calculation
         # min_size = self.contract_detail(pair, 'minSize')
@@ -734,8 +738,8 @@ class InteractiveBroker:
         The default price_rounding_mode in conf is ROUND.
         For stoploss calculations, must use ROUND_UP for longs, and ROUND_DOWN for shorts.
         """
-        
-        price_increment = self._get_prize_increment(pair)
+
+        price_increment = self._markets.get(pair, {}).get('price_increment', None)
 
         # NOTE this will only round down the price
         return int(price / price_increment) * price_increment
@@ -745,8 +749,8 @@ class InteractiveBroker:
         Get's the "1 pip" value for this pair.
         Used in PriceFilter to calculate the 1pip movements.
         """
-        min_tick =  self.contract_detail(pair, 'minTick')
-        
+        min_tick = self._markets.get(pair, {}).get('price_increment', None)
+
         return min_tick
 
     def get_min_pair_stake_amount(
@@ -765,27 +769,32 @@ class InteractiveBroker:
             raise OperationalException(f'{self.name}.get_max_pair_stake_amount should'
                                        'never set max_stake_amount to None')
         return max_stake_amount
-    
+
     # TODO this is simplified version
     def _get_contract_limit(
             self,
             pair: str,
         ) -> Dict[str, dict]:
-        contract_detail = self._get_contract_detail(pair)
-        account_summary = self._api.accountSummary()
-        available_funds = next((tag.value for tag in account_summary if tag.tag == 'AvailableFunds'), None)
+        """
+        Get the minimum or maximum stake amount for a pair
+        """
+
+        if self._config.get('dry_run', False):
+            fund_size = self._config.get('dry_run_wallet', 10000)
+        else:
+            fund_size = self._config.get('available_capital', 0)
 
         limit = {
             'cost': {
                 'min': 0,
-                'max': float('inf')
+                'max': float(fund_size)
             },
             'amount': {
-                'min': contract_detail.minSize,
-                'max': float(available_funds)
+                'min': self._markets.get(pair, {}).get('min_size', None),
+                'max': float('inf')
             }
         }
-    
+
         return limit
 
 
@@ -815,7 +824,7 @@ class InteractiveBroker:
 
         stake_limits = []
         limits = self._get_contract_limit(pair)
-    
+
         if (limits['cost'][limit] is not None):
             stake_limits.append(
                 self._contracts_to_amount(pair, limits['cost'][limit]) * stoploss_reserve
@@ -1060,7 +1069,7 @@ class InteractiveBroker:
         return (
             ordertype != 'market'
         )
-    
+
 
     @staticmethod
     def _trade_status(trade: Trade) -> str:
@@ -1075,19 +1084,19 @@ class InteractiveBroker:
             'Filled': 'closed',
             'Inactive': 'canceled'
         }
-        
+
         try:
             return status_map[trade.orderStatus.status]
-    
+
         except KeyError:
             return None
-        
+
     @staticmethod
     def _trade_commision(trade: Trade) -> float:
         commision = sum(fill.commissionReport.commission for fill in trade.fills)
 
         return commision
-    
+
     def _format_ib_order(self, trade: Trade, pair: str, leverage: float, type: str) -> Dict:
 
         order_time = trade.log[0].time if trade.log else dt_now()
@@ -1286,7 +1295,7 @@ class InteractiveBroker:
         contract = self._create_contract(pair)
         order = StopOrder(side.upper(), amount, stop_price_norm)
         order.outsideRth = True
-        
+
         try:
             trade = self._api.placeOrder(contract, order)
         except ConnectionRefusedError as e:
@@ -1312,7 +1321,7 @@ class InteractiveBroker:
                     break
             else:
                 raise InvalidOrderException(f"Couldn't find order id {order_id}")
-            
+
             order = self._format_ib_order(trade)
             self._log_exchange_response('fetch_order', order)
             order = self._order_contracts_to_amount(order)
@@ -1506,12 +1515,12 @@ class InteractiveBroker:
         since_ms = int((since.timestamp() - 10) * 1000)
 
         filter_trade = [
-            t for t in self._api.trades() 
-            if t.log 
+            t for t in self._api.trades()
+            if t.log
             and dt_ts(t.log[0].time) >= since_ms
             and t.contract.symbol == contract.symbol
             ]
-        
+
         orders = [self._format_ib_order(t) for t in filter_trade]
 
         self._log_exchange_response('fetch_orders', orders)
@@ -1554,7 +1563,7 @@ class InteractiveBroker:
                     'bidVolume': t.bidSize
                 } for t in ib_tickers
             ]
-            
+
             with self._cache_lock:
                 self._fetch_tickers_cache['fetch_tickers'] = tickers
             return tickers
@@ -1579,7 +1588,7 @@ class InteractiveBroker:
                 'bidVolume': t.bidSize,
                 'last': t.last
             }
-            
+
             return tickers
 
         except ConnectionRefusedError as e:
@@ -1609,7 +1618,7 @@ class InteractiveBroker:
                 ask=ask
             )
             return order_book
-        
+
         # NOTE Currently accept all IB exception
         except ConnectionRefusedError as e:
             raise TemporaryError(
@@ -1809,27 +1818,14 @@ class InteractiveBroker:
         :param price: Price of order
         :param taker_or_maker: 'maker' or 'taker' (ignored if "type" is provided)
         """
-        
+
         # NOTE https://www.interactivebrokers.com/en/pricing/commissions-stocks.php
+        # Calculate on default fee with 0.005 / share
 
-        contract = self._create_contract(symbol)
+        fee_rate_per_share = self._config.get('fee_rate_per_share', 0.005)
+
         # create order
-        order = Order()
-        order.action = 'BUY'
-        order.orderType = 'LMT'
-        order.totalQuantity = amount
-        order.lmtPrice = price
-        order.whatIf = True
-
-        what_if = self._api.whatIfOrder(
-            contract,
-            order
-        )
-
-        if not what_if.commissionCurrency:
-            return 0
-        
-        return what_if.commission
+        return fee_rate_per_share * amount
 
 
     @staticmethod
@@ -1942,7 +1938,7 @@ class InteractiveBroker:
                 return f"{days} D"
             else:
                 return f"{seconds} S"
-            
+
         def date_timestamp_ms(date_obj: date | datetime):
 
             if type(date_obj) is date:
@@ -1951,7 +1947,7 @@ class InteractiveBroker:
                 date_time = date_obj
 
             return date_time.timestamp() * 1000
-        
+
         def bar_size_to_seconds(bar_size: str) -> int:
             """
             Convert an IB bar size string to the total number of seconds.
@@ -1977,7 +1973,7 @@ class InteractiveBroker:
 
             raise ValueError(f"Invalid bar size format: {bar_size}")
 
-        
+
         def calculate_chunk_duration(since_datetime: datetime, until_datetime: datetime, bar_size: str):
             max_bars = 1000
             seconds_per_bar = bar_size_to_seconds(bar_size)
@@ -1986,7 +1982,7 @@ class InteractiveBroker:
             duration_str = timedelta_to_duration_str(chunk_end_datetime - since_datetime)
 
             return duration_str, chunk_end_datetime
-            
+
         contract = self._create_contract(pair)
         bar_size = self.timeframe_to_ib_format(timeframe)
         since_datetime = datetime.fromtimestamp(since_ms / 1000)
@@ -1995,7 +1991,7 @@ class InteractiveBroker:
         all_bars = []
         while since_datetime < until_datetime:
             duration_str, chunk_end_datetime = calculate_chunk_duration(since_datetime, until_datetime, bar_size)
-        
+
             bars = self._api.reqHistoricalData(
                 contract,
                 endDateTime=chunk_end_datetime,
@@ -2015,7 +2011,7 @@ class InteractiveBroker:
 
         # Format for freqtrade
         data = [
-            [date_timestamp_ms(d.date), d.open, d.high, d.low, d.close, d.volume] for d in all_bars    
+            [date_timestamp_ms(d.date), d.open, d.high, d.low, d.close, d.volume] for d in all_bars
         ]
 
         logger.info(f"Downloaded data for {pair} with length {len(data)}.")
